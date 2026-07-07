@@ -697,6 +697,30 @@ describe("CLI Status Command", () => {
     expect(stdout).toContain("changes Hugging Face download endpoint");
   }, 20000);
 
+  test("qmd doctor reports API provider mode without leaking API keys", async () => {
+    const env = await createIsolatedTestEnv("doctor-api-provider");
+    const secret = "sk-test-do-not-print";
+    const { stdout, exitCode } = await runQmd(["doctor"], {
+      dbPath: env.dbPath,
+      configDir: env.configDir,
+      env: {
+        QMD_API_KEY: secret,
+        QMD_API_BASE: "https://api.example.test/v1",
+        QMD_EMBED_PROVIDER: "api",
+        QMD_RERANK_PROVIDER: "api",
+      },
+    });
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("QMD_API_KEY=(set)");
+    expect(stdout).toContain("QMD_API_BASE=https://api.example.test/v1");
+    expect(stdout).toContain("remote API provider");
+    expect(stdout).toContain("Qwen/Qwen3-Embedding-8B");
+    expect(stdout).toContain("Qwen/Qwen3-Reranker-8B");
+    expect(stdout).not.toContain(secret);
+    expect(stdout).not.toContain("QMD_API_KEY=sk-");
+  }, 20000);
+
   test("qmd doctor flags mixed embedding fingerprints", async () => {
     const db = openDatabase(testDbPath);
     const doc = db.prepare(`SELECT hash FROM documents WHERE active = 1 LIMIT 1`).get() as { hash: string };

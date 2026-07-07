@@ -85,6 +85,106 @@ describe("model name resolution", () => {
   });
 });
 
+describe("API provider mode", () => {
+  function withApiEnv(fn: () => Promise<void>): Promise<void> {
+    const previous = {
+      QMD_API_KEY: process.env.QMD_API_KEY,
+      QMD_API_BASE: process.env.QMD_API_BASE,
+      QMD_EMBED_PROVIDER: process.env.QMD_EMBED_PROVIDER,
+      QMD_RERANK_PROVIDER: process.env.QMD_RERANK_PROVIDER,
+      QMD_QUERY_EXPANSION: process.env.QMD_QUERY_EXPANSION,
+    };
+
+    process.env.QMD_API_KEY = "test-key";
+    process.env.QMD_API_BASE = "https://api.example.test/v1";
+    process.env.QMD_EMBED_PROVIDER = "api";
+    process.env.QMD_RERANK_PROVIDER = "api";
+    delete process.env.QMD_QUERY_EXPANSION;
+
+    return fn().finally(() => {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      vi.unstubAllGlobals();
+      setNodeLlamaCppModuleForTest(null);
+    });
+  }
+
+  test("uses API model defaults when API provider config is present", async () => {
+    await withApiEnv(async () => {
+      expect(resolveEmbedModel()).toBe("Qwen/Qwen3-Embedding-8B");
+      expect(resolveRerankModel()).toBe("Qwen/Qwen3-Reranker-8B");
+      expect(resolveGenerateModel()).toBe("none");
+    });
+  });
+
+  test("embeds through an OpenAI-compatible API without loading llama.cpp", async () => {
+    await withApiEnv(async () => {
+      setNodeLlamaCppModuleForTest({
+        LlamaLogLevel: { error: "error" },
+        resolveModelFile: vi.fn(),
+        LlamaChatSession: vi.fn() as any,
+        getLlama: vi.fn(async () => {
+          throw new Error("local llama should not load");
+        }),
+      });
+
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          data: body.input.map((_text: string, index: number) => ({
+            index,
+            embedding: [index + 1, index + 2, index + 3],
+          })),
+        }), { status: 200 });
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const llm = new LlamaCpp({ embedModel: "Qwen/Qwen3-Embedding-8B" });
+      const results = await llm.embedBatch(["alpha", "beta"]);
+
+      expect(results.map(result => result?.embedding)).toEqual([[1, 2, 3], [2, 3, 4]]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.test/v1/embeddings");
+      expect((fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>).Authorization).toBe("Bearer test-key");
+    });
+  });
+
+  test("reranks through API and maps returned indexes back to files", async () => {
+    await withApiEnv(async () => {
+      const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+        results: [
+          { index: 1, relevance_score: 0.91 },
+          { index: 0, relevance_score: 0.12 },
+        ],
+      }), { status: 200 }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const llm = new LlamaCpp({ rerankModel: "Qwen/Qwen3-Reranker-8B" });
+      const result = await llm.rerank("query", [
+        { file: "a.md", text: "first" },
+        { file: "b.md", text: "second" },
+      ]);
+
+      expect(result.model).toBe("Qwen/Qwen3-Reranker-8B");
+      expect(result.results.map(item => [item.file, item.score])).toEqual([
+        ["b.md", 0.91],
+        ["a.md", 0.12],
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.example.test/v1/rerank");
+    });
+  });
+
+  test("query expansion is disabled by default in API-first mode", async () => {
+    await withApiEnv(async () => {
+      const llm = new LlamaCpp();
+      await expect(llm.expandQuery("memory docs")).resolves.toEqual([]);
+    });
+  });
+});
+
 // =============================================================================
 // Singleton Tests (no model loading required)
 // =============================================================================

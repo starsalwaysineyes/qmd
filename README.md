@@ -1072,6 +1072,11 @@ llm_cache       -- Cached LLM responses (query expansion, rerank scores)
 | `QMD_LLAMA_GPU` | `auto` | Force llama.cpp GPU backend (`metal`, `vulkan`, `cuda`) or disable GPU with `false` |
 | `QMD_FORCE_CPU` | unset | Set to `1`/`true` to force CPU mode before any CUDA/Vulkan/Metal probing. Equivalent CLI flag: `--no-gpu`. |
 | `QMD_EMBED_PARALLELISM` | automatic | Override embedding/reranking context parallelism (1-8). Windows CUDA defaults to `1` because parallel CUDA contexts can crash with `ggml-cuda.cu:98`; use Vulkan or raise this only if your driver is stable. |
+| `QMD_API_KEY` / `SILICONFLOW_API_KEY` | unset | Enable OpenAI-compatible remote embeddings and reranking. When set without explicit model overrides, QMD defaults to `Qwen/Qwen3-Embedding-8B` and `Qwen/Qwen3-Reranker-8B`. |
+| `QMD_API_BASE` | `https://api.siliconflow.com/v1` | Remote API base URL. Use `QMD_EMBED_API_BASE` or `QMD_RERANK_API_BASE` to override one role. |
+| `QMD_EMBED_PROVIDER` / `QMD_RERANK_PROVIDER` | auto | Set to `api` to force the remote provider, or `local` to force llama.cpp for that role. |
+| `QMD_API_TIMEOUT_MS` | `60000` | Remote API request timeout. Per-role variants: `QMD_EMBED_API_TIMEOUT_MS`, `QMD_RERANK_API_TIMEOUT_MS`. |
+| `QMD_QUERY_EXPANSION` | auto | Set to `off`/`0`/`false` to skip local query expansion. This is the default when API models are selected automatically. |
 
 ## How It Works
 
@@ -1188,7 +1193,8 @@ Query ──► LLM Expansion ──► [Original, Variant 1, Variant 2]
 
 ## Model Configuration
 
-The default models are defined in `src/llm.ts` as HuggingFace URIs:
+Without API provider configuration, the default models are defined in `src/llm.ts`
+as HuggingFace GGUF URIs:
 
 ```typescript
 const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
@@ -1199,6 +1205,39 @@ const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query
 Override them per-role without touching source via the `models:` block in
 `index.yml` (see [Configuring `index.yml`](#configuring-indexyml)) or the
 `QMD_EMBED_MODEL` env var. Re-run `qmd embed` after changing the embedding model.
+
+### Remote API Provider
+
+QMD can use an OpenAI-compatible API for embeddings and reranking instead of
+loading local GGUF models. Set one API key and leave model names unset to use
+the Qwen defaults:
+
+```bash
+export SILICONFLOW_API_KEY="..."
+export QMD_API_BASE="https://api.siliconflow.com/v1"
+qmd embed
+qmd query "search terms"
+```
+
+With this configuration:
+
+- embeddings use `Qwen/Qwen3-Embedding-8B`
+- reranking uses `Qwen/Qwen3-Reranker-8B`
+- query expansion defaults to `none`, so no local generation model is loaded
+- token-based chunking falls back to an approximate tokenizer and avoids
+  loading the local embedding model just to split documents
+
+Per-role overrides are available:
+
+```bash
+export QMD_EMBED_API_KEY="..."
+export QMD_RERANK_API_KEY="..."
+export QMD_EMBED_MODEL="Qwen/Qwen3-Embedding-8B"
+export QMD_RERANK_MODEL="Qwen/Qwen3-Reranker-8B"
+```
+
+Set `QMD_EMBED_PROVIDER=local` or `QMD_RERANK_PROVIDER=local` to force the
+original llama.cpp path even when an API key is present.
 
 ### EmbeddingGemma Prompt Format
 

@@ -73,6 +73,13 @@ export async function withNativeStdoutRedirectedToStderr<T>(fn: () => Promise<T>
 import { homedir } from "os";
 import { join } from "path";
 import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync, writeFileSync, openSync, readSync, closeSync } from "fs";
+import {
+  embedWithApi,
+  hasApiProviderConfig,
+  isDisabledModel,
+  shouldUseApiProvider,
+  rerankWithApi,
+} from "./api-provider.js";
 
 // =============================================================================
 // Embedding Formatting Functions
@@ -246,13 +253,17 @@ export type RerankDocument = {
 // Model Configuration
 // =============================================================================
 
-// HuggingFace model URIs for node-llama-cpp
-// Format: hf:<user>/<repo>/<file>
-// Override via QMD_EMBED_MODEL env var (e.g. hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf)
-const DEFAULT_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
-const DEFAULT_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
-// const DEFAULT_GENERATE_MODEL = "hf:ggml-org/Qwen3-0.6B-GGUF/Qwen3-0.6B-Q8_0.gguf";
-const DEFAULT_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
+const DEFAULT_LOCAL_EMBED_MODEL = "hf:ggml-org/embeddinggemma-300M-GGUF/embeddinggemma-300M-Q8_0.gguf";
+const DEFAULT_LOCAL_RERANK_MODEL = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf";
+const DEFAULT_LOCAL_GENERATE_MODEL = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf";
+
+const DEFAULT_API_EMBED_MODEL = "Qwen/Qwen3-Embedding-8B";
+const DEFAULT_API_RERANK_MODEL = "Qwen/Qwen3-Reranker-8B";
+const DEFAULT_API_GENERATE_MODEL = "none";
+
+const DEFAULT_EMBED_MODEL = DEFAULT_LOCAL_EMBED_MODEL;
+const DEFAULT_RERANK_MODEL = DEFAULT_LOCAL_RERANK_MODEL;
+const DEFAULT_GENERATE_MODEL = DEFAULT_LOCAL_GENERATE_MODEL;
 
 // Alternative generation models for query expansion:
 // LiquidAI LFM2 - hybrid architecture optimized for edge/on-device inference
@@ -271,15 +282,21 @@ export type ModelResolutionConfig = {
 };
 
 export function resolveEmbedModel(config?: ModelResolutionConfig): string {
-  return config?.embed || process.env.QMD_EMBED_MODEL || DEFAULT_EMBED_MODEL;
+  return config?.embed
+    || process.env.QMD_EMBED_MODEL
+    || (hasApiProviderConfig("embed") ? DEFAULT_API_EMBED_MODEL : DEFAULT_LOCAL_EMBED_MODEL);
 }
 
 export function resolveGenerateModel(config?: ModelResolutionConfig): string {
-  return config?.generate || process.env.QMD_GENERATE_MODEL || DEFAULT_GENERATE_MODEL;
+  return config?.generate
+    || process.env.QMD_GENERATE_MODEL
+    || (hasApiProviderConfig("embed") || hasApiProviderConfig("rerank") ? DEFAULT_API_GENERATE_MODEL : DEFAULT_LOCAL_GENERATE_MODEL);
 }
 
 export function resolveRerankModel(config?: ModelResolutionConfig): string {
-  return config?.rerank || process.env.QMD_RERANK_MODEL || DEFAULT_RERANK_MODEL;
+  return config?.rerank
+    || process.env.QMD_RERANK_MODEL
+    || (hasApiProviderConfig("rerank") ? DEFAULT_API_RERANK_MODEL : DEFAULT_LOCAL_RERANK_MODEL);
 }
 
 export function resolveModels(config?: ModelResolutionConfig): Required<ModelResolutionConfig> {
@@ -288,6 +305,17 @@ export function resolveModels(config?: ModelResolutionConfig): Required<ModelRes
     generate: resolveGenerateModel(config),
     rerank: resolveRerankModel(config),
   };
+}
+
+export function usesApiEmbeddingModel(model: string = resolveEmbedModel()): boolean {
+  return shouldUseApiProvider("embed", model);
+}
+
+export function estimateTokenCount(text: string): number {
+  if (!text) return 0;
+  // Conservative mixed CJK/code/prose estimate. This is used only when QMD is
+  // running API-first and no local tokenizer is loaded.
+  return Math.max(1, Math.ceil(text.length / 3));
 }
 
 // Local model cache directory
@@ -750,6 +778,16 @@ export class LlamaCpp implements LLM {
 
   get rerankModelName(): string {
     return this.rerankModelUri;
+  }
+
+  private usesApiEmbeddings(): boolean {
+    return shouldUseApiProvider("embed", this.embedModelUri);
+  }
+
+  private isQueryExpansionDisabled(): boolean {
+    const envValue = process.env.QMD_QUERY_EXPANSION?.trim().toLowerCase();
+    if (envValue && ["0", "false", "off", "none", "disabled"].includes(envValue)) return true;
+    return isDisabledModel(this.generateModelUri);
   }
 
   /**
@@ -1232,6 +1270,9 @@ export class LlamaCpp implements LLM {
    * Returns tokenizer tokens (opaque type from node-llama-cpp)
    */
   async tokenize(text: string): Promise<readonly LlamaToken[]> {
+    if (this.usesApiEmbeddings()) {
+      return Array.from({ length: estimateTokenCount(text) }, (_, i) => i as unknown as LlamaToken);
+    }
     await this.ensureEmbedContext();  // Ensure model is loaded
     if (!this.embedModel) {
       throw new Error("Embed model not loaded");
@@ -1251,6 +1292,11 @@ export class LlamaCpp implements LLM {
    * Detokenize token IDs back to text
    */
   async detokenize(tokens: readonly LlamaToken[]): Promise<string> {
+    if (this.usesApiEmbeddings()) {
+      // API mode uses approximate token counts only. Callers that need exact
+      // text truncation should use character-based chunking instead.
+      return "";
+    }
     await this.ensureEmbedContext();
     if (!this.embedModel) {
       throw new Error("Embed model not loaded");
@@ -1299,6 +1345,12 @@ export class LlamaCpp implements LLM {
     this.touchActivity();
 
     try {
+      const model = options.model ?? this.embedModelUri;
+      if (shouldUseApiProvider("embed", model)) {
+        const [result] = await embedWithApi([text], model);
+        return result ?? null;
+      }
+
       const context = await this.ensureEmbedContext();
 
       // Guard: truncate text that exceeds model context window to prevent GGML crash
@@ -1311,7 +1363,7 @@ export class LlamaCpp implements LLM {
 
       return {
         embedding: Array.from(embedding.vector),
-        model: options.model ?? this.embedModelUri,
+        model,
       };
     } catch (error) {
       console.error("Embedding error:", error);
@@ -1324,11 +1376,22 @@ export class LlamaCpp implements LLM {
    * Uses Promise.all for parallel embedding - node-llama-cpp handles batching internally
    */
   async embedBatch(texts: string[], options: EmbedOptions = {}): Promise<(EmbeddingResult | null)[]> {
-    if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
     if (texts.length === 0) return [];
+    const model = options.model ?? this.embedModelUri;
+
+    if (shouldUseApiProvider("embed", model)) {
+      try {
+        return await embedWithApi(texts, model);
+      } catch (error) {
+        console.error("Batch embedding API error:", error);
+        return texts.map(() => null);
+      }
+    }
+
+    if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
 
     try {
       const contexts = await this.ensureEmbedContexts();
@@ -1346,7 +1409,7 @@ export class LlamaCpp implements LLM {
             }
             const embedding = await context.getEmbeddingFor(safeText);
             this.touchActivity();
-            embeddings.push({ embedding: Array.from(embedding.vector), model: options.model ?? this.embedModelUri });
+            embeddings.push({ embedding: Array.from(embedding.vector), model });
           } catch (err) {
             console.error("Embedding error for text:", err);
             embeddings.push(null);
@@ -1373,7 +1436,7 @@ export class LlamaCpp implements LLM {
               }
               const embedding = await ctx.getEmbeddingFor(safeText);
               this.touchActivity();
-              results.push({ embedding: Array.from(embedding.vector), model: options.model ?? this.embedModelUri });
+              results.push({ embedding: Array.from(embedding.vector), model });
             } catch (err) {
               console.error("Embedding error for text:", err);
               results.push(null);
@@ -1391,6 +1454,9 @@ export class LlamaCpp implements LLM {
   }
 
   async generate(prompt: string, options: GenerateOptions = {}): Promise<GenerateResult | null> {
+    if (isDisabledModel(options.model ?? this.generateModelUri)) {
+      return null;
+    }
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
@@ -1433,6 +1499,12 @@ export class LlamaCpp implements LLM {
   }
 
   async modelExists(modelUri: string): Promise<ModelInfo> {
+    if (isDisabledModel(modelUri) || !modelUri.trim()) {
+      return { name: modelUri, exists: false };
+    }
+    if (shouldUseApiProvider("embed", modelUri) || shouldUseApiProvider("rerank", modelUri)) {
+      return { name: modelUri, exists: true };
+    }
     // For HuggingFace URIs, we assume they exist
     // For local paths, check if file exists
     if (modelUri.startsWith("hf:")) {
@@ -1452,6 +1524,9 @@ export class LlamaCpp implements LLM {
   // ==========================================================================
 
   async expandQuery(query: string, options: { context?: string, includeLexical?: boolean, intent?: string } = {}): Promise<Queryable[]> {
+    if (this.isQueryExpansionDisabled()) {
+      return [];
+    }
     if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
@@ -1556,9 +1631,19 @@ export class LlamaCpp implements LLM {
     documents: RerankDocument[],
     options: RerankOptions = {}
   ): Promise<RerankResult> {
-    if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
+    const activeModel = options.model ?? this.rerankModelUri;
+
+    if (shouldUseApiProvider("rerank", activeModel)) {
+      const results = await rerankWithApi(query, documents, activeModel);
+      return {
+        results,
+        model: activeModel,
+      };
+    }
+
+    if (this._ciMode) throw new Error("LLM operations are disabled in CI (set CI=true)");
 
     const contexts = await this.ensureRerankContexts();
     const model = await this.ensureRerankModel();
@@ -1642,7 +1727,7 @@ export class LlamaCpp implements LLM {
 
     return {
       results,
-      model: this.rerankModelUri,
+      model: activeModel,
     };
   }
 

@@ -28,8 +28,10 @@ import {
   DEFAULT_EMBED_MODEL_URI,
   DEFAULT_RERANK_MODEL_URI,
   DEFAULT_GENERATE_MODEL_URI,
+  estimateTokenCount,
   type RerankDocument,
   type ILLMSession,
+  usesApiEmbeddingModel,
 } from "./llm.js";
 import type {
   NamedCollection,
@@ -2769,8 +2771,6 @@ export async function chunkDocumentByTokens(
   chunkStrategy: ChunkStrategy = "regex",
   signal?: AbortSignal
 ): Promise<{ text: string; pos: number; tokens: number }[]> {
-  const llm = getDefaultLlamaCpp();
-
   // Use moderate chars/token estimate (prose ~4, code ~2, mixed ~3)
   // If chunks exceed limit, they'll be re-split with actual ratio
   const avgCharsPerToken = 3;
@@ -2781,6 +2781,16 @@ export async function chunkDocumentByTokens(
   // Chunk in character space with conservative estimate
   // Use AST-aware chunking for the first pass when filepath/strategy provided
   let charChunks = await chunkDocumentAsync(content, maxChars, overlapChars, windowChars, filepath, chunkStrategy);
+
+  if (usesApiEmbeddingModel()) {
+    return charChunks.map(chunk => ({
+      text: chunk.text,
+      pos: chunk.pos,
+      tokens: estimateTokenCount(chunk.text),
+    }));
+  }
+
+  const llm = getDefaultLlamaCpp();
 
   // Tokenize and split any chunks that still exceed limit
   const results: { text: string; pos: number; tokens: number }[] = [];

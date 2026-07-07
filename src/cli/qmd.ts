@@ -81,6 +81,7 @@ import {
   type ChunkStrategy,
 } from "../store.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, setDefaultLlamaCpp, LlamaCpp, withLLMSession, pullModels, DEFAULT_MODEL_CACHE_DIR, resolveEmbedModel, resolveGenerateModel, resolveRerankModel, resolveModels, inspectGgufFile, isDarwinMetalMitigationActive } from "../llm.js";
+import { isDisabledModel, shouldUseApiProvider } from "../api-provider.js";
 import {
   formatSearchResults,
   formatDocuments,
@@ -3472,6 +3473,11 @@ function collectEnvironmentOverrides(activeModels: { embed: string; generate: st
     if (!raw) return;
     overrides.push({ name, value: envValueForDisplay(raw), consequence });
   };
+  const addSecret = (name: string, consequence: string) => {
+    const raw = process.env[name]?.trim();
+    if (!raw) return;
+    overrides.push({ name, value: "(set)", consequence });
+  };
   const addModel = (name: string, key: "embed" | "generate" | "rerank", active: string) => {
     const raw = process.env[name]?.trim();
     if (!raw) return;
@@ -3489,6 +3495,21 @@ function collectEnvironmentOverrides(activeModels: { embed: string; generate: st
   addModel("QMD_EMBED_MODEL", "embed", activeModels.embed);
   addModel("QMD_GENERATE_MODEL", "generate", activeModels.generate);
   addModel("QMD_RERANK_MODEL", "rerank", activeModels.rerank);
+  addSecret("QMD_API_KEY", "enables OpenAI-compatible remote embedding/reranking provider defaults");
+  addSecret("QMD_EMBED_API_KEY", "sets the remote embedding API key and overrides QMD_API_KEY for embeddings");
+  addSecret("QMD_RERANK_API_KEY", "sets the remote reranking API key and overrides QMD_API_KEY for reranking");
+  addSecret("SILICONFLOW_API_KEY", "enables SiliconFlow-compatible embedding/reranking provider defaults");
+  add("QMD_API_BASE", "sets the OpenAI-compatible API base URL for remote embedding/reranking");
+  add("QMD_EMBED_API_BASE", "sets the remote embedding API base URL and overrides QMD_API_BASE");
+  add("QMD_RERANK_API_BASE", "sets the remote reranking API base URL and overrides QMD_API_BASE");
+  add("QMD_API_PROVIDER", "selects the provider backend for embeddings/reranking (api or local)");
+  add("QMD_EMBED_PROVIDER", "selects the embedding provider backend (api or local)");
+  add("QMD_RERANK_PROVIDER", "selects the reranking provider backend (api or local)");
+  add("QMD_API_TIMEOUT_MS", "sets the remote API request timeout in milliseconds");
+  add("QMD_EMBED_API_TIMEOUT_MS", "sets the remote embedding API request timeout in milliseconds");
+  add("QMD_RERANK_API_TIMEOUT_MS", "sets the remote reranking API request timeout in milliseconds");
+  add("QMD_EMBED_DIMENSIONS", "requests a provider-specific embedding dimension when the API supports it");
+  add("QMD_QUERY_EXPANSION", "controls query expansion; set to off/0/false to avoid loading a local generation model");
   add("QMD_FORCE_CPU", "forces llama.cpp to bypass GPU backends; embeddings/query will be slower but GPU crashes are avoided");
   add("QMD_LLAMA_GPU", "selects llama.cpp GPU backend (metal/cuda/vulkan) or disables GPU when set to false/off/0");
   add("QMD_DOCTOR_DEVICE_PROBE", "controls qmd doctor native device probing; 0/off skips GPU probing");
@@ -3576,12 +3597,26 @@ function checkModelDefaults(activeModels: { embed: string; generate: string; rer
 
 function checkModelCache(activeModels: { embed: string; generate: string; rerank: string }, nextSteps: string[]): void {
   const models = [
-    ["embedding", activeModels.embed],
-    ["generation", activeModels.generate],
-    ["reranking", activeModels.rerank],
+    ["embedding", "embed", activeModels.embed],
+    ["generation", "generate", activeModels.generate],
+    ["reranking", "rerank", activeModels.rerank],
   ] as const;
   const unique = new Map<string, string[]>();
-  for (const [role, model] of models) {
+  const remoteApi: string[] = [];
+  const disabled: string[] = [];
+  for (const [role, key, model] of models) {
+    const label = `${role}: ${model}`;
+    if (isDisabledModel(model)) {
+      disabled.push(label);
+      continue;
+    }
+    if (
+      (key === "embed" && shouldUseApiProvider("embed", model))
+      || (key === "rerank" && shouldUseApiProvider("rerank", model))
+    ) {
+      remoteApi.push(label);
+      continue;
+    }
     unique.set(model, [...(unique.get(model) ?? []), role]);
   }
 
@@ -3600,13 +3635,19 @@ function checkModelCache(activeModels: { embed: string; generate: string; rerank
   }
 
   if (missing.length === 0 && invalid.length === 0) {
-    doctorCheck("model cache", true, `${cached.length} active ${cached.length === 1 ? "model is" : "models are"} downloaded and valid GGUF`);
+    const parts: string[] = [];
+    if (cached.length > 0) parts.push(`${cached.length} active ${cached.length === 1 ? "model is" : "models are"} downloaded and valid GGUF`);
+    if (remoteApi.length > 0) parts.push(`remote API provider: ${remoteApi.join("; ")}`);
+    if (disabled.length > 0) parts.push(`disabled: ${disabled.join("; ")}`);
+    doctorCheck("model cache", true, parts.length > 0 ? parts.join("; ") : "no local model cache required");
     return;
   }
 
   const parts: string[] = [];
   if (invalid.length > 0) parts.push(`invalid ${invalid.length}: ${invalid.join("; ")}`);
   if (missing.length > 0) parts.push(`missing ${missing.length}/${unique.size}: ${missing.join("; ")}`);
+  if (remoteApi.length > 0) parts.push(`remote API provider: ${remoteApi.join("; ")}`);
+  if (disabled.length > 0) parts.push(`disabled: ${disabled.join("; ")}`);
   const next = invalid.length > 0
     ? "Next: run `qmd pull --refresh` (or remove the bad cached file)"
     : "Next: run `qmd pull`";
