@@ -275,6 +275,40 @@ export function mergeBreakPoints(a: BreakPoint[], b: BreakPoint[]): BreakPoint[]
  * Core chunk algorithm that operates on precomputed break points and code fences.
  * This is the shared implementation used by both regex-only and AST-aware chunking.
  */
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
+}
+
+function alignUtf16BoundaryBackward(content: string, pos: number): number {
+  const boundedPos = Math.max(0, Math.min(pos, content.length));
+  if (
+    boundedPos > 0
+    && boundedPos < content.length
+    && isHighSurrogate(content.charCodeAt(boundedPos - 1))
+    && isLowSurrogate(content.charCodeAt(boundedPos))
+  ) {
+    return boundedPos - 1;
+  }
+  return boundedPos;
+}
+
+function alignUtf16BoundaryForward(content: string, pos: number): number {
+  const boundedPos = Math.max(0, Math.min(pos, content.length));
+  if (
+    boundedPos > 0
+    && boundedPos < content.length
+    && isHighSurrogate(content.charCodeAt(boundedPos - 1))
+    && isLowSurrogate(content.charCodeAt(boundedPos))
+  ) {
+    return boundedPos + 1;
+  }
+  return boundedPos;
+}
+
 export function chunkDocumentWithBreakPoints(
   content: string,
   breakPoints: BreakPoint[],
@@ -312,12 +346,23 @@ export function chunkDocumentWithBreakPoints(
       endPos = Math.min(charPos + maxChars, content.length);
     }
 
+    // JavaScript string offsets are UTF-16 code units. A target size or
+    // overlap can land between a surrogate pair (for example inside an emoji),
+    // producing an ill-formed string that strict embedding APIs reject.
+    endPos = alignUtf16BoundaryBackward(content, endPos);
+    if (endPos <= charPos) {
+      endPos = alignUtf16BoundaryForward(
+        content,
+        Math.min(charPos + maxChars, content.length),
+      );
+    }
+
     chunks.push({ text: content.slice(charPos, endPos), pos: charPos });
 
     if (endPos >= content.length) {
       break;
     }
-    charPos = endPos - overlapChars;
+    charPos = alignUtf16BoundaryBackward(content, endPos - overlapChars);
     const lastChunkPos = chunks.at(-1)!.pos;
     if (charPos <= lastChunkPos) {
       charPos = endPos;

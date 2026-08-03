@@ -620,6 +620,23 @@ describe("Document Chunking", () => {
     }
   });
 
+  test("chunkDocument keeps surrogate pairs intact at chunk ends", () => {
+    const content = `${"a".repeat(5)}😀${"b".repeat(10)}`;
+    const chunks = chunkDocument(content, 6, 0, 0);
+
+    expect(chunks.map(chunk => chunk.text).join("")).toBe(content);
+    expect(chunks.every(chunk => chunk.text.isWellFormed())).toBe(true);
+  });
+
+  test("chunkDocument keeps surrogate pairs intact at overlap starts", () => {
+    const content = `${"a".repeat(5)}🇨🇳${"b".repeat(10)}`;
+    const chunks = chunkDocument(content, 10, 4, 0);
+
+    expect(chunks[1]!.pos).toBe(5);
+    expect(chunks[1]!.text.startsWith("🇨🇳")).toBe(true);
+    expect(chunks.every(chunk => chunk.text.isWellFormed())).toBe(true);
+  });
+
   test("chunkDocument with default params uses 900-token chunks", () => {
     // Default is CHUNK_SIZE_CHARS (3600 chars) with CHUNK_OVERLAP_CHARS (540 chars)
     const content = "Word ".repeat(2500);  // ~12500 chars
