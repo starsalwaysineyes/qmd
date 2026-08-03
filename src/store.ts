@@ -1960,9 +1960,9 @@ export function createStore(dbPath?: string): Store {
     ensureVecTable: (dimensions: number) => ensureVecTableInternal(db, dimensions),
 
     // Index health
-    getHashesNeedingEmbedding: (model?: string) => getHashesNeedingEmbedding(db, undefined, model ?? store.llm?.embedModelName ?? DEFAULT_EMBED_MODEL),
-    getIndexHealth: (model?: string) => getIndexHealth(db, model ?? store.llm?.embedModelName ?? DEFAULT_EMBED_MODEL),
-    getStatus: (model?: string) => getStatus(db, model ?? store.llm?.embedModelName ?? DEFAULT_EMBED_MODEL),
+    getHashesNeedingEmbedding: (model?: string) => getHashesNeedingEmbedding(db, undefined, model ?? getLlm(store).embedModelName),
+    getIndexHealth: (model?: string) => getIndexHealth(db, model ?? getLlm(store).embedModelName),
+    getStatus: (model?: string) => getStatus(db, model ?? getLlm(store).embedModelName),
 
     // Caching
     getCacheKey,
@@ -1996,8 +1996,14 @@ export function createStore(dbPath?: string): Store {
     searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
 
     // Query expansion & reranking
-    expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model ?? store.llm?.generateModelName ?? DEFAULT_QUERY_MODEL, db, intent, store.llm),
-    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => rerank(query, documents, model ?? store.llm?.rerankModelName ?? DEFAULT_RERANK_MODEL, db, intent, store.llm),
+    expandQuery: (query: string, model?: string, intent?: string) => {
+      const llm = getLlm(store);
+      return expandQuery(query, model ?? llm.generateModelName, db, intent, llm);
+    },
+    rerank: (query: string, documents: { file: string; text: string }[], model?: string, intent?: string) => {
+      const llm = getLlm(store);
+      return rerank(query, documents, model ?? llm.rerankModelName, db, intent, llm);
+    },
 
     // Document retrieval
     findDocument: (filename: string, options?: { includeBody?: boolean }) => findDocument(db, filename, options),

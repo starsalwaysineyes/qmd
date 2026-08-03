@@ -2077,7 +2077,6 @@ describe("Document Retrieval", () => {
       await cleanupTestDb(store);
     });
   });
-
 });
 
 // =============================================================================
@@ -3085,6 +3084,37 @@ describe.skipIf(!!process.env.CI)("LlamaCpp Integration", () => {
       expect(rerankSpy.mock.calls[0]?.[1]).toEqual([{ file: "doc2.md", text: "Shared chunk text" }]);
     } finally {
       llmSpy.mockRestore();
+      await cleanupTestDb(store);
+    }
+  });
+
+});
+
+describe("Store model resolution", () => {
+  test("rerank uses the active default LLM model when the store has no override", async () => {
+    const store = await createTestStore();
+    const activeModel = "Qwen/Qwen3-Reranker-8B";
+    const rerankSpy = vi.fn(async (_query: string, docs: { file: string; text: string }[], options?: { model?: string }) => ({
+      results: docs.map((doc, index) => ({
+        file: doc.file,
+        score: 1 - index * 0.1,
+        index,
+      })),
+      model: options?.model ?? activeModel,
+    }));
+
+    setDefaultLlamaCpp({
+      rerankModelName: activeModel,
+      rerank: rerankSpy,
+    } as any);
+
+    try {
+      await store.rerank("network", [{ file: "network.md", text: "BBR congestion control" }]);
+
+      expect(rerankSpy).toHaveBeenCalledTimes(1);
+      expect(rerankSpy.mock.calls[0]?.[2]).toEqual({ model: activeModel });
+    } finally {
+      setDefaultLlamaCpp(null);
       await cleanupTestDb(store);
     }
   });
