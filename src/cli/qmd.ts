@@ -741,7 +741,7 @@ async function updateCollections(): Promise<void> {
   }
 
   // Check if any documents need embedding (show once at end)
-  const needsEmbedding = getHashesNeedingEmbedding(db);
+  const needsEmbedding = storeInstance.getHashesNeedingEmbedding();
   closeDb();
 
   console.log(`${c.green}✓ All collections updated.${c.reset}`);
