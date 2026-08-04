@@ -3497,7 +3497,9 @@ function collectEnvironmentOverrides(activeModels: { embed: string; generate: st
   addModel("QMD_RERANK_MODEL", "rerank", activeModels.rerank);
   addSecret("QMD_API_KEY", "enables OpenAI-compatible remote embedding/reranking provider defaults");
   addSecret("QMD_EMBED_API_KEY", "sets the remote embedding API key and overrides QMD_API_KEY for embeddings");
+  add("QMD_EMBED_API_KEY_FILE", "reads the remote embedding API key from a file and overrides SILICONFLOW_API_KEY");
   addSecret("QMD_RERANK_API_KEY", "sets the remote reranking API key and overrides QMD_API_KEY for reranking");
+  add("QMD_RERANK_API_KEY_FILE", "reads the remote reranking API key from a file and overrides SILICONFLOW_API_KEY");
   addSecret("SILICONFLOW_API_KEY", "enables SiliconFlow-compatible embedding/reranking provider defaults");
   add("QMD_API_BASE", "sets the OpenAI-compatible API base URL for remote embedding/reranking");
   add("QMD_EMBED_API_BASE", "sets the remote embedding API base URL and overrides QMD_API_BASE");

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 export type ApiRole = "embed" | "rerank";
 
 export type ApiConfig = {
@@ -44,6 +46,27 @@ function parseTimeout(value: string | undefined): number {
   return parsed;
 }
 
+function readApiKeyFile(path: string | undefined, envName: string): string | undefined {
+  if (!path) return undefined;
+  try {
+    const value = readFileSync(path, "utf8").trim();
+    if (value) return value;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to read ${envName}: ${detail}`);
+  }
+  throw new Error(`${envName} is empty`);
+}
+
+function resolveApiKey(prefix: "QMD_EMBED" | "QMD_RERANK"): string | undefined {
+  const explicit = envFirst(`${prefix}_API_KEY`, "QMD_API_KEY");
+  if (explicit) return explicit;
+  const keyFileName = envFirst(`${prefix}_API_KEY_FILE`, "QMD_API_KEY_FILE");
+  const fromFile = readApiKeyFile(keyFileName, `${prefix}_API_KEY_FILE`);
+  if (fromFile) return fromFile;
+  return envFirst("SILICONFLOW_API_KEY");
+}
+
 export function isLikelyLocalModel(model: string): boolean {
   const normalized = model.trim();
   if (!normalized) return false;
@@ -79,15 +102,23 @@ export function hasApiProviderConfig(role: ApiRole): boolean {
   const prefix = roleEnvPrefix(role);
   const provider = envFirst(`${prefix}_PROVIDER`, "QMD_API_PROVIDER")?.toLowerCase();
   if (provider && ["api", "openai", "siliconflow", "remote", "http"].includes(provider)) return true;
-  return !!envFirst(`${prefix}_API_KEY`, "QMD_API_KEY", "SILICONFLOW_API_KEY", `${prefix}_API_BASE`, "QMD_API_BASE");
+  return !!envFirst(
+    `${prefix}_API_KEY`,
+    "QMD_API_KEY",
+    `${prefix}_API_KEY_FILE`,
+    "QMD_API_KEY_FILE",
+    "SILICONFLOW_API_KEY",
+    `${prefix}_API_BASE`,
+    "QMD_API_BASE"
+  );
 }
 
 export function resolveApiConfig(role: ApiRole): ApiConfig {
   const prefix = roleEnvPrefix(role);
-  const apiKey = envFirst(`${prefix}_API_KEY`, "QMD_API_KEY", "SILICONFLOW_API_KEY");
+  const apiKey = resolveApiKey(prefix);
   if (!apiKey) {
     throw new Error(
-      `${prefix}_API_KEY or QMD_API_KEY is required for API ${role === "embed" ? "embeddings" : "reranking"}`
+      `${prefix}_API_KEY, ${prefix}_API_KEY_FILE, or QMD_API_KEY is required for API ${role === "embed" ? "embeddings" : "reranking"}`
     );
   }
 
